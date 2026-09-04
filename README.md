@@ -4,3 +4,4 @@ Sql assignment
 youtube link: 
 updated assignment withthe comment section 
 api table has been done
+erd with relevant infomation 
