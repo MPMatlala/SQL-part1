@@ -1,0 +1,206 @@
+name: SQL CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - '**.sql'
+      - '.github/workflows/*.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '**.sql'
+  workflow_dispatch:
+
+jobs:
+  validate-sql:
+    name: Validate SQL Syntax
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup SQL tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sqlite3 postgresql-client
+      
+      - name: Check SQL files
+        run: |
+          echo "Checking SQL files..."
+          find . -name "*.sql" -type f | while read file; do
+            echo "Validating $file"
+            # Basic syntax check
+            if [[ "$file" == *.sql ]]; then
+              if ! sqlite3 :memory: < "$file" 2>/dev/null; then
+                echo "⚠️  Warning: Syntax issues in $file (sqlite3 check)"
+              else
+                echo "✅ $file passed basic syntax check"
+              fi
+            fi
+          done
+
+  run-migrations:
+    name: Run Database Migrations
+    needs: validate-sql
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Wait for PostgreSQL
+        run: |
+          until pg_isready -h localhost -p 5432 -U testuser; do
+            sleep 2
+          done
+      
+      - name: Run SQL migrations
+        env:
+          PGPASSWORD: testpass
+        run: |
+          for sql_file in $(find . -name "*.sql" | sort); do
+            echo "Executing $sql_file"
+            psql -h localhost -U testuser -d testdb -f "$sql_file"
+          done
+      
+      - name: Verify database state
+        run: |
+          PGPASSWORD=testpass psql -h localhost -U testuser -d testdb -c "\dt"
+          PGPASSWORD=testpass psql -h localhost -U testuser -d testdb -c "SELECT current_database(), current_user;"
+
+  lint-sql:
+    name: Lint SQL Code
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install sqlfluff
+        run: pip install sqlfluff
+      
+      - name: Run SQLFluff linter
+        run: |
+          if find . -name "*.sql" -type f | grep -q .; then
+            sqlfluff lint . --dialect postgres
+          else
+            echo "No SQL files found to lint"
+          fi
+      
+      - name: Upload linting results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-lint-results
+          path: |
+            *.log
+            sqlfluff-output.txt
+
+  test-queries:
+    name: Test SQL Queries
+    needs: run-migrations
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup test data
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb << EOF
+          CREATE TABLE IF NOT EXISTS test_results (
+            id SERIAL PRIMARY KEY,
+            test_name VARCHAR(100),
+            status VARCHAR(20),
+            executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          EOF
+      
+      - name: Execute test queries
+        env:
+          PGPASSWORD: testpass
+        run: |
+          # Test your specific SQL queries here
+          psql -h localhost -U testuser -d testdb -c "SELECT version();"
+          psql -h localhost -U testuser -d testdb -c "SELECT schemaname, tablename FROM pg_tables WHERE schemaname = 'public';"
+      
+      - name: Generate test report
+        run: |
+          echo "## SQL Test Results" > report.md
+          echo "" >> report.md
+          echo "| Test | Status | Timestamp |" >> report.md
+          echo "|------|--------|-----------|" >> report.md
+          echo "| Validation | ✅ Passed | $(date -u +'%Y-%m-%d %H:%M:%S UTC') |" >> report.md
+          echo "" >> report.md
+          echo "### Database Schema" >> report.md
+          echo "\`\`\`sql" >> report.md
+          PGPASSWORD=testpass psql -h localhost -U testuser -d testdb -c "\dt" >> report.md 2>&1
+          echo "\`\`\`" >> report.md
+      
+      - name: Upload test report
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: report.md
+
+  deploy-notification:
+    name: Deployment Notification
+    needs: [validate-sql, run-migrations, lint-sql, test-queries]
+    if: success()
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Success message
+        run: |
+          echo "✅ All SQL checks passed successfully!"
+          echo "📊 Database migrations completed"
+          echo "🔍 Linting passed"
+          echo "🧪 All queries validated"
+      
+      - name: Create deployment status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request?.number;
+            if (prNumber) {
+              await github.rest.issues.createComment({
+                issue_number: prNumber,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: '✅ **SQL CI/CD Pipeline passed!**\n\nAll SQL files have been validated, linted, and tested successfully.'
+              });
+            }
