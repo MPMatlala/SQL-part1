@@ -6,4 +6,4 @@ updated assignment withthe comment section
 api table has been done
 erd with relevant infomation 
 erd has 7 entities to 8
-commited the read me 
+commited the read me having a table for each entities 
