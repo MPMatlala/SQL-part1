@@ -3,3 +3,4 @@ SQL of my planning on the assignment part 1
 Sql assignment
 youtube link: 
 updated assignment withthe comment section 
+api table has been done
