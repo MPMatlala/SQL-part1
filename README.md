@@ -13,3 +13,4 @@ referencing github:
 select funktion to the and display table
 all work is related to one another 
 section two is the APi and part 3 is SQL
+i have tables with information
